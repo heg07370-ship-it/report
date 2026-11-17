@@ -672,5 +672,76 @@ Unauthenticated testing is now exhausted. F1/F2/F3/2.5 require a test account
 permission to create one Stripe session safely.
 
 ================================================================================
+PART 5 - CRITICAL: UNAUTHENTICATED, applicationId-KEYED STRIPE OPERATIONS
+================================================================================
+Discovered by downloading and scanning ALL 368 lazy chunks (220 /api routes).
+
+5.1 Money endpoints take NO authentication
+  Client call sites (no Authorization header sent at all):
+    POST /api/stripe/accept-no-charge   {applicationId}
+    POST /api/stripe/charge-balance     {applicationId}
+    POST /api/stripe/refund-deposit     {applicationId, reason?}
+    POST /api/stripe/create-checkout-session {pipelineId, applicationData, returnUrl}
+
+  Endpoint behavior (SAFE test with a non-existent UUID, no side effects):
+    POST /api/stripe/accept-no-charge  {"applicationId":"00000000-...-000000000000"}
+      -> 404 {"error":"Application not found"}
+    POST /api/stripe/charge-balance    {"applicationId":"00000000-...-000000000000"}
+      -> 404 {"error":"Application not found"}
+    POST /api/stripe/refund-deposit    {"applicationId":"00000000-...-000000000000"}
+      -> 404 {"error":"Application not found"}
+    => No 401. The server looks up the application and, if found, performs the
+       financial action. Authorization is effectively "know the applicationId".
+
+5.2 applicationId is PREDICTABLE (chains with F3)
+  TeamFeed application list hook reads Firestore collection "Applications":
+    query(collection(db,"Applications"), where("pipelineId","==",n), ...)
+    docs.map(f => ({ id: f.id, ...f.data() }))
+  The admin UI passes s.id / c.id / f.id as applicationId.
+  Part 1 / F3 established the id creation in the Aply client:
+    id = Op(email)_pipelineId   with Op = lowercase, non-alnum -> "_"
+  => applicationId is derivable from (candidate email + public pipeline slug).
+
+5.3 Exploit chain (DO NOT EXECUTE without authorization)
+   1. Pick a pipeline slug (public routes, e.g. /pipeline/sorority-rush-specialists).
+   2. Guess/obtain a candidate email; compute id = normalized_email + "_" + slug.
+   3. POST unauthenticated:
+        /api/stripe/refund-deposit   -> refund the applicant's $99 deposit
+        /api/stripe/charge-balance   -> force-charge the $400 balance
+        /api/stripe/accept-no-charge -> accept the applicant with no charge
+   4. No auth, no CSRF token, no ownership check.
+
+5.4 Impact
+   - Financial loss/fraud: mass deposit refunds ($99 each); forced charges to
+     applicants ($400); free acceptances bypassing the pay-per-result model.
+   - Reputational/legal: unauthorized charges to students' cards, chargebacks,
+     support/PR fallout.
+   - Scale: endpoint is unauthenticated and (like other routes) not rate-limited
+     in observation; predictable ids make targeted enumeration feasible.
+   - Severity: CRITICAL (broken function-level authorization + business logic).
+
+5.5 Fix
+   - Require admin authentication + authorization on all /api/stripe/* actions;
+     never authorize a money action by an id in the request body alone.
+   - Use non-guessable application ids (no PII-derived ids).
+   - Add idempotency keys, server-side state machine, Stripe webhook
+     reconciliation, audit logging, and per-user rate limits.
+
+5.6 Related leads (not validated)
+   - POST /api/deal-rooms/unlock {slug,email,...} returns the room directly;
+     access appears gated only by an email on the guest list (no OTP). If true,
+     knowing a guest's email grants deal-room access. GET
+     /api/deal-rooms/public/:slug also returns room data by slug.
+   - /api/meet/rec/sign is auth-gated (returns 401 with ids present) - not a
+     finding.
+
+5.7 Full API size
+   220 distinct /api routes across 368 chunks (agents/chat, aria broadcasts &
+   Apollo enrichment, scout, seeding, deal-rooms, payments, meet, brain, etc.).
+   Only the /api/stripe/* routes lacked an auth check in the empty-body
+   differential; public read routes: /api/company-categories, /api/invites/:t,
+   /api/collab/invites/:t, /api/demo-shares/:id, /api/deal-rooms/public/:slug.
+
+================================================================================
 END OF REPORT
 ================================================================================
