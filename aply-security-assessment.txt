@@ -485,5 +485,109 @@ curl -sS -H 'Content-Type: application/json' \
      "https://identitytoolkit.googleapis.com/v1/accounts:createAuthUri?key=<FIREBASE_API_KEY>"
 
 ================================================================================
+PART 2 - DEEP HUNT: TEAMFEED PRODUCT (teamfeed.co / teamfeed-server)
+================================================================================
+Note: TeamFeed is the operations platform behind the Aply specialist program
+("messaging - payments"). Same Firebase project (mrkt-2efde), same backend
+(teamfeed-server.onrender.com) reachable from teamfeed.co.
+
+2.1 Additional front-end assets
+  teamfeed.co SPA bundle : /assets/index-DhhB2v4c.js (~1.48 MB)
+  308 lazy-loaded chunks referenced under /assets/*.js
+
+2.2 DNS / email posture (aply.com)
+  TXT : hosting-site=mrkt-2efde ; firebase=mrkt-2efde
+        v=spf1 include:zohomail.com include:_spf.firebasemail.com ~all
+        google-site-verification=... ; zoho-verification=...
+  MX  : mx.zoho.com (10), mx2.zoho.com (20), mx3.zoho.com (50)
+  DMARC: v=DMARC1; p=none   (weak - informational)
+  CAA : none
+
+2.3 Full API surface (teamfeed-server.onrender.com)
+  Public / no auth:
+    GET  /api/company-categories            -> 200 (static category list)
+    GET  /api/invites/:token                -> 200 {"valid":false,"status":"not_found"}
+    GET  /api/collab/invites/:token         -> 200 {"valid":false,"status":"not_found"}
+    GET  /api/demo-shares/:id               -> 404 {"error":"not_found"}
+    POST /api/stripe/create-checkout-session-> 400 {"error":"Missing pipelineId"}  <-- NO AUTH
+  Auth required (401 without valid Bearer / Firebase ID token):
+    /api/me, /api/me/active-workspace, /api/me/feed-types, /api/me/feeds,
+    /api/me/join-requests, /api/me/workspaces, /api/threads, /api/workspaces,
+    /api/workspaces/:id, /api/workspace/:id/catalog, /api/workspace/:id/entitlements,
+    /api/workspace/:id/billing-portal, /api/people/:id, /api/companies,
+    /api/companies/:id, /api/brain/extract, /api/brain/ingest-website,
+    /api/brain/nodes, /api/brain/settings, /api/brain/:id, /api/joint/teems,
+    /api/joint/feeds/:id, /api/joint/invites/:id, /api/your-teem/teams/:id,
+    /api/anna/campaigns/:id, /api/anna/q/:id, /api/aria/gmail-auth-url,
+    /api/aria/sender-disconnect, /api/collab/client-feeds,
+    /api/collab/feeds/:id/notify-message, /api/collab/feeds/:id/proposals/send,
+    /api/collab/feeds/:id/proposals/:pid/withdraw,
+    /api/payments/feeds/:id/proposals/:pid/intent,
+    /api/pipelines/suggest-brands, /api/pipelines/apollo-org-lookup,
+    /api/pipelines/brand-contacts
+  Systematic POST differential (empty body) result: ONLY
+  /api/stripe/create-checkout-session lacks auth middleware (400 before
+  validation); every other route returns 401 first. Confirmed.
+
+2.4 [HIGH] Unauthenticated Stripe checkout creation + client-controlled
+    applicationData and returnUrl
+  Location: PaymentPortalPage chunk; route /pay?app=<b64url>&return=<url>
+  Client code (PaymentPortalPage-Ci2nqhbt.js):
+    const U = s => { ... atob(base64url(s)) ... JSON.parse(...) };   // ?app=
+    const L = () => { const [t]=useSearchParams(); return ...
+      pipelineId: slug, applicationData: decode(t.get("app")),
+      returnUrl: t.get("return") };
+    fetch(`${server}/api/stripe/create-checkout-session`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ pipelineId, applicationData, returnUrl })
+    })                                   // <-- NO Authorization header
+
+  Results / risk:
+    - applicationData is base64url JSON fully controlled by the URL and sent
+      unauthenticated. It is the applicant identity payload tied to the $99
+      deposit. Attacker can forge/alias applicant data or attribute a payment
+      to arbitrary values.
+    - returnUrl is client-supplied and forwarded to Stripe session creation.
+      If not strictly allow-listed, it is an open redirect after payment
+      (phishing). Needs safe validation with owner permission (would create a
+      real Stripe session to confirm).
+    - No auth => session-creation spam / abuse.
+    - Price itself appears fixed server-side ($99 deposit, $400 balance in the
+      hardcoded portal config), so direct amount tampering is not evident from
+      the client, but server trust of applicationData is a real concern.
+
+  Fix: authenticate + rate-limit; validate returnUrl against an allowlist;
+  derive applicant identity from the authenticated user, never from ?app=.
+
+2.5 [HIGH lead] Client-side authorization model in feeds/teams
+  feedMutations chunk derives the caller's role/privileges in the browser from
+  document fields: participants[].role ("aply"/"brand"/"creators"),
+  adminIds[], memberIds[], members[<id>].role, and writes tfFeeds / tfTeams
+  (e.g. {[`members.${id}`]:{role:"member",approved:true,...}}).
+  If Firestore rules allow a member to write adminIds/memberIds/participants/
+  members on a feed/team doc, they can self-elevate to admin (see rosters, real
+  names, payouts, admin actions). Mirrors F2; needs an authenticated account +
+  rule check to confirm.
+
+2.6 Pricing / product context (for impact framing)
+  AI teammates: Anna (Sales Dev) $99/mo, Hana (PR) $29/mo, Liam (Creator
+  Programs) $29/mo, Unlimited $7/mo; credits + overage billing; workspace
+  catalog/entitlements; $99 application deposit + $400 balance on acceptance.
+
+2.7 New remediation items
+  - Authenticate and authorize /api/stripe/create-checkout-session; allowlist
+    returnUrl; do not trust ?app= for applicant identity.
+  - Enforce feed/team roles server-side (custom claims or server checks), not
+    from client-writable adminIds/memberIds.
+  - Consider DMARC p=quarantine/reject; add CAA.
+
+2.8 Status of Part 2 items
+  - 2.3 auth differential: CONFIRMED.
+  - 2.4 no-auth endpoint: CONFIRMED (400 Missing pipelineId, no auth).
+        returnUrl open-redirect + applicationData tampering: NOT validated
+        (would create real Stripe sessions) - needs owner permission.
+  - 2.5 client-side role model: CODE-EVIDENCED; rules unverified.
+
+================================================================================
 END OF REPORT
 ================================================================================
