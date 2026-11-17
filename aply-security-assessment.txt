@@ -589,5 +589,88 @@ Note: TeamFeed is the operations platform behind the Aply specialist program
   - 2.5 client-side role model: CODE-EVIDENCED; rules unverified.
 
 ================================================================================
+PART 3 - INFRASTRUCTURE / DNS SURFACE (deep hunt)
+================================================================================
+Complete resolving surface (DNS via DoH, crt.sh, hackertarget):
+
+  aply.com                   199.36.158.100     Firebase Hosting (Aply SPA)
+  www.aply.com               199.36.158.100     Firebase Hosting (same)
+  internal.aply.com          199.36.158.100     Firebase Hosting (same) - NOT internal
+  www.teamfeed.co            199.36.158.100     Firebase Hosting site "teamfeedaply"
+  links.aply.com             CloudFront -> links2.resend-dns.com   (Resend click tracking)
+  links.auth.teamfeed.co     CloudFront -> links2.resend-dns.com   (Resend click tracking)
+  pay.aply.com               CloudFront -> paylinks.commerce.godaddy.com (GoDaddy paylink)
+  aply-server.onrender.com   Render             Express API (aply)
+  teamfeed-server.onrender.com Render           Express API (TeamFeed)
+
+Firebase Hosting sites:
+  mrkt-2efde.web.app / .firebaseapp.com   -> Aply SPA (2782-byte index)
+  teamfeedaply.web.app / .firebaseapp.com -> "Teamfeed - Hire AI Teammates | 24/7 AI Workforce"
+
+DNS records:
+  aply.com TXT : hosting-site=mrkt-2efde ; firebase=mrkt-2efde ;
+                 v=spf1 include:zohomail.com include:_spf.firebasemail.com ~all ;
+                 google-site-verification=... ; zoho-verification=...
+  aply.com MX  : mx.zoho.com (10) / mx2 (20) / mx3 (50)
+  _dmarc.aply.com : v=DMARC1; p=none            <-- weak
+  teamfeed.co TXT : hosting-site=teamfeedaply ; v=spf1 include:zohomail.com ~all
+  teamfeed.co MX  : mx.zoho.com (10) / mx2 (20) / mx3 (50)
+  _dmarc.teamfeed.co : v=DMARC1; p=reject; ...  <-- good
+  CAA : none on aply.com
+
+TLS:
+  links.aply.com            CN=links.aply.com (Amazon)
+  links.auth.teamfeed.co    CN=links.auth.teamfeed.co (Amazon)
+  pay.aply.com              CN=pay.aply.com, SAN pay.aply.com, www.pay.aply.com (GoDaddy G2)
+
+Notes:
+  - links.aply.com and links.auth.teamfeed.co are Resend email link-tracking
+    (CNAME links2.resend-dns.com). Every path returns CloudFront 400; no open
+    redirect observed. These carry rewritten links from outbound email
+    (including auth/OTP mail).
+  - "internal.aply.com" is mislabeled: it serves the same public SPA.
+
+Third-party secrets in bundles: NONE beyond the public Firebase web API key.
+  (Checked: sk_live/sk_test/rk_live/pk, Resend re_, SendGrid SG., OpenAI sk-,
+   AWS AKIA, GitHub ghp_, Sentry DSN, Apollo, Stripe, Supabase.)
+
+Firestore collections referenced: tfUsers, tfTeams, tfFeeds/feeds, messages,
+  brain, users. All return 403 unauthenticated.
+
+================================================================================
+PART 4 - CONSOLIDATED IMPACT MATRIX
+================================================================================
+ID  Finding                                              Sev    State
+F1  Client self-assigns paymentStatus=balance_paid +     CRIT   code-evidenced
+    decisionStatus=active (revenue/paid-access bypass)           (rules unverified)
+F2  Admin/chapter-admin = client-written role +           HIGH   code-evidenced
+    hardcoded allowlist "nd@aply.com"                            (rules unverified)
+F3  Predictable Application doc IDs (email_pipelineId)      HIGH   code-evidenced
+    -> applicant PII IDOR                                        (rules unverified)
+2.4 Unauth /api/stripe/create-checkout-session +          HIGH   endpoint CONFIRMED
+    client applicationData / returnUrl                           (open-redirect
+                                                                  unvalidated)
+2.5 Client-side RBAC in feeds/teams                        HIGH   code-evidenced
+    (adminIds/memberIds/participants)                            (rules unverified)
+F4  Unauth + unrate-limited LLM proxy (aply-server)       MED    CONFIRMED
+F5  Firebase user enumeration (email enumeration)         LOW    CONFIRMED
+2.x DMARC p=none on aply.com (spoofing)                   LOW    CONFIRMED (infra)
+    No CAA record                                         INFO   CONFIRMED (infra)
+
+Business impact summary:
+  - Revenue: paid-contract ($20/hr) and paid-course access can be self-granted;
+    $99 deposit / $400 balance flow has an unauthenticated session-creation
+    endpoint with client-controlled applicant payload and redirect.
+  - Privacy: candidate/student PII (email, userId, decisions, payment state) is
+    in predictably-keyed application docs; exposure depends on read rules.
+  - Integrity/abuse: client-side roles could allow UGC/course/chapter/feed
+    admin actions; open AI proxy enables cost abuse.
+  - Brand: user enumeration + DMARC p=none enable phishing/spoofing.
+
+Unauthenticated testing is now exhausted. F1/F2/F3/2.5 require a test account
+(Firebase ID token) to confirm rule behavior; 2.4 returnUrl requires owner
+permission to create one Stripe session safely.
+
+================================================================================
 END OF REPORT
 ================================================================================
