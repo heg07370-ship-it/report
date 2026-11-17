@@ -1,0 +1,126 @@
+================================================================================
+CONSOLIDATED BUG REGISTER + RECON SUMMARY
+================================================================================
+Date    : 2026-11-18
+Targets : A) aply.com / teamfeed.co   B) ably.com
+Status  : A = NOT AUTHORIZED (no program) - do not exploit/submit
+          B = AUTHORIZED in-scope (Ably VDP, disclosure@ably.com)
+
+--------------------------------------------------------------------------------
+A. APLY / TEAMFEED  (UNAUTHORIZED - NO PROGRAM)
+--------------------------------------------------------------------------------
+A.0 Authorization
+  No program on HackerOne / Bugcrowd / YesWeHack / disclose.io.
+  No security.txt, no security.* DNS, no security@ contact.
+  MCP scope_check "authorized" was a false positive (echoes target).
+  DO NOT EXPLOIT OR SUBMIT. Support contacts only:
+    hello@aply.com, membership@aply.com, hello@teamfeed.com
+
+A.1 CONFIRMED FINDINGS (live evidence)
+  C1 [CRITICAL] Unauthenticated Stripe money endpoints, keyed only by
+     applicationId:
+       POST /api/stripe/accept-no-charge   {applicationId}
+       POST /api/stripe/charge-balance     {applicationId}
+       POST /api/stripe/refund-deposit     {applicationId, reason?}
+       POST /api/stripe/create-checkout-session {pipelineId,applicationData,returnUrl}
+     Evidence: bogus UUID -> 404 {"error":"Application not found"} with NO 401.
+     Client sends no Authorization header.
+  C2 [MEDIUM] Unauth + unrate-limited AI proxy (aply-server.onrender.com):
+       POST /ai/enrich-company   -> 200
+       POST /ai/evaluate-lane-fit-> 400/200
+     3 rapid calls all 200. Prompt injection resisted.
+  C3 [LOW] Firebase Auth user enumeration (project mrkt-2efde):
+       accounts:createAuthUri -> registered boolean
+       accounts:sendOobCode   -> EMAIL_NOT_FOUND
+       accounts:signInWithPassword -> EMAIL_NOT_FOUND vs INVALID_PASSWORD
+  C4 [LOW] Public data/validity endpoints:
+       GET /api/company-categories (static list, 200)
+       GET /api/invites/:token            -> {valid:false,status:not_found}
+       GET /api/collab/invites/:token     -> {valid:false,status:not_found}
+       GET /api/demo-shares/:id           -> 404 not_found
+
+A.2 CODE-EVIDENCED (UNCONFIRMED - need auth / Firestore rules)
+  U1 Client self-assigns paymentStatus="balance_paid" and
+     decisionStatus="active" via setDoc(...,{merge:true}) in
+     Pipeline-Jc2L2Pp1.js ("UGC join"). Gate reads these client-side.
+     -> paid-access / revenue bypass. (Rules unverified.)
+  U2 Admin/chapter-admin is client-controlled: hardcoded allowlist
+     ["nd@aply.com"] in client; role:"leadership"/isAdmin written client-side.
+     Admin screens: /admin/ugc-approvals, /admin/course/:id. (Rules unverified.)
+  U3 Application doc id = normalize(email)+"_"+pipelineId (predictable).
+     Chains with C1 -> compute an applicationId from email + public slug.
+     Read-scope (PII IDOR) depends on rules. (ID scheme confirmed.)
+  U4 Client-side RBAC in feeds/teams (participants[].role, adminIds[],
+     memberIds[], members[].role) written from browser. (Rules unverified.)
+  U5 Stripe returnUrl (client ?return=) and applicationData (client ?app=)
+     are forwarded unauthenticated -> possible open redirect / applicant
+     data forgery. Not validated (would create real Stripe sessions).
+  U6 deal-rooms/unlock {slug,email} appears to grant access by email only
+     (no OTP). Not validated with a real slug/email.
+
+A.3 RECON SUMMARY
+  Hosts : aply.com/www/internal (Firebase Hosting), www.teamfeed.co
+          (teamfeedaply), links.aply.com + links.auth.teamfeed.co
+          (CloudFront -> Resend click-tracking), pay.aply.com (GoDaddy),
+          aply-server.onrender.com, teamfeed-server.onrender.com.
+  Firebase: project mrkt-2efde; Firestore/RTDB/Storage all 403 unauth.
+  API   : 220 distinct /api routes across 368 JS chunks; only /api/stripe/*
+          lacked an auth check in the empty-body differential.
+  Infra : DMARC aply.com p=none (weak), teamfeed.co p=reject; no CAA;
+          no third-party secrets in bundles (only public Firebase key).
+  Hardened: no source maps, no .env/.git/backups, API auth 401, CORS * but
+          no allow-credentials, no subdomain takeover.
+
+A.4 NOTE
+  Target now resets our TLS connections (source IP likely blocked after
+  enumeration). No further active Aply testing performed.
+
+--------------------------------------------------------------------------------
+B. ABLY  (AUTHORIZED IN-SCOPE - VDP)
+--------------------------------------------------------------------------------
+B.0 Program
+  Policy: https://ably.com/disclosure ; contact disclosure@ably.com
+  Payouts: Low = recognition; Medium $500; High $1,000; Critical $3,000.
+  Scope: ably.com, ancillary *.ably.com (not internal), control.ably.net,
+         main.realtime.ably.net, realtime.ably.io, rest.ably.io,
+         *.realtime.ably.net, *-realtime.ably.io, *-rest.ably.io,
+         *.ably-realtime.com, customer CNAMEs.
+  Out of scope: SDKs, ably-cli/ably-server, third-party hosts (Intercom,
+         support.ably.com, SafeBase security.ably.com, HubSpot pages,
+         Statuspage status.ably.com), internal services, ai-assistant.
+  Excluded classes: user enumeration, DMARC/SPF, TLS/header config,
+         abstract open redirect/CSRF, DoS/brute force, version disclosure.
+
+B.1 CONFIRMED BUGS
+  None found in the unauthenticated in-scope surface.
+
+B.2 RECON / TESTED
+  - Subdomains: ~35 *.ably.com resolved; CNAME chains all live -> NO
+    subdomain takeover.
+  - ably.com: no .git/.env/config/database.yml/backups/manifests exposed;
+    no reflected XSS in /search or /docs; generic JSON 404 errors.
+  - /metrics -> 401 (protected). OAuth passthru -> 404.
+  - control.ably.net: routes auth-gated (40400); CORS * without
+    allow-credentials (safe for Basic/header auth).
+  - rest.ably.io / main.realtime.ably.net: /time 200 (expected);
+    /channels, /stats -> 401. No unauth data.
+  - dashboards-external.ably.com: Vercel login with returnTo
+    (open redirect class excluded by policy).
+  - web-cli-terminal.ably.com: 404/empty (no surface found).
+
+B.3 BLOCKED
+  Authenticated authorization testing (IDOR across apps, token scoping,
+  channel permissions, dashboard authz) requires an Ably app API key.
+  Cannot self-register (no inbox); doc-published keys are out of scope.
+
+--------------------------------------------------------------------------------
+C. REPO
+--------------------------------------------------------------------------------
+  https://github.com/heg07370-ship-it/report (private)
+    aply-security-assessment.txt  (Parts 1-5, detailed)
+    poc_aply_safe.sh              (non-destructive validation PoC)
+    bug-register.txt              (this file)
+
+================================================================================
+END
+================================================================================
