@@ -141,3 +141,44 @@ Remaining untested (need more setup):
 ================================================================================
 END
 ================================================================================
+================================================================================
+7. FINAL DEEP TESTS (appended)
+================================================================================
+7.1 Integration-rules SSRF (historical "SSRF to RCE", Critical)
+  - Created benign http rule (url https://example.com) -> 201; deleted (204).
+  - Private/loopback/link-local URLs REJECTED at validation:
+      422 {"details":{"base":["Disallowed IP address"]}}
+      tested: 127.0.0.1, localhost, 10.0.0.1, [::1], 192.168.0.1, 0.0.0.0,
+              169.254.169.254
+  - Filter-bypass attempts:
+      127.1, 2130706433, 0x7f000001, 0177.0.0.1, 127.0.0.1.nip.io,
+      localtest.me, [::ffff:127.0.0.1], 127.0.0.1.sslip.io,
+      example.com@127.0.0.1  -> all 422
+      127.0.0.1@example.com  -> 201 (correct: host = example.com, public)
+    => No SSRF / no validation bypass. Rules deleted; rules list empty.
+
+7.2 Signed TokenRequest capability escalation (historical 6.5)
+  - Ably spec (https://ably.com/docs/api/token-request-spec): "The receiving
+    Ably server ... verifies that the requested capabilities are permitted for
+    that token based on the key capabilities. The server may choose to subset
+    the capabilities."
+  - Unsigned path already observed to cap {publish} request from a
+    subscribe-only key to {"*":["subscribe"]}.
+  - Signed path is bounded by the key by design -> no escalation.
+
+7.3 Realtime protocol (Node 22 WebSocket, Ably protocol v2)
+  - v1.2 rejected ("protocol version no longer supported"), v2 connects.
+  - Connected + ATTACHED + MESSAGE publish -> ACK.
+  - Revoked token (targets ["clientId:<id>"]) mid-connection:
+      server closed the WebSocket (code 1000) and post-revocation publish was
+      not ACKed.
+    => Token revocation enforced for live connections. No bug.
+
+7.4 Cleanup
+  - Temp key sNuyEA (revocation test): revoked status=1.
+  - Temp key Y1JINw (realtime revocation test): revoked status=1.
+  - No rules left; no other state changed.
+
+FINAL: No confirmed vulnerability on Ably in-scope assets. All tested classes
+(hardening, authz, SSRF, revocation, realtime) behaved correctly.
+================================================================================
