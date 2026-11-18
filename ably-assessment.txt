@@ -1,0 +1,143 @@
+================================================================================
+ABLY (ably.com) - AUTHORIZED SECURITY ASSESSMENT
+================================================================================
+Date        : 2026-11-18
+Target      : Ably Realtime (ably.com) - in-scope assets
+Authorization: Ably VDP (https://ably.com/disclosure), disclosure@ably.com
+               Safe harbor for in-scope testing. Payouts: Low=recognition,
+               Medium=$500, High=$1,000, Critical=$3,000.
+Status      : NO CONFIRMED BUGS. Unauthenticated + authenticated authorization
+              tests all behaved correctly. Historical bug classes appear fixed.
+
+--------------------------------------------------------------------------------
+1. SCOPE
+--------------------------------------------------------------------------------
+In scope:
+  - ably.com and ancillary *.ably.com (operated by Ably, not internal)
+  - control.ably.net
+  - main.realtime.ably.net, realtime.ably.io, rest.ably.io
+  - *.realtime.ably.net, *-realtime.ably.io, *-rest.ably.io, *.ably-realtime.com
+  - customer CNAMEs
+Out of scope:
+  - SDKs, ably-cli/ably-server, non-customer-facing/internal services
+  - third-party hosts: Intercom support chat, support.ably.com, SafeBase
+    (security.ably.com), HubSpot (email/faqs/knowledge/pages/quotes),
+    Statuspage (status.ably.com)
+  - ai-assistant.ably.com (not referenced publicly -> internal/non-customer-facing)
+Excluded classes: user enumeration, SPF/DMARC, TLS/header config, abstract
+  open redirect/CSRF, DoS/brute force, version disclosure.
+
+--------------------------------------------------------------------------------
+2. RECON
+--------------------------------------------------------------------------------
+Resolving hosts (DNS via DoH, crt.sh):
+  ably.com / www            Cloudflare (IPv6) -> Heroku origin
+  control.ably.net          Heroku + CloudFront
+  rest.ably.io / main.realtime.ably.net / realtime.ably.io
+  *.ably.com ancillary: api-docs, articles, brand, cdn, changelog,
+    dashboards, dashboards-external, demo, docs, email, faqs, files, ghost,
+    go, img, insights, jobs, jsbin, knowledge, metabase, nocodb, nonprod-cdn,
+    onyx, pages, quotes, render, schemas, sdk, security, status, support,
+    voltaire, web-cli, web-cli-terminal, www-stats
+CNAMEs:
+  - security.ably.com          -> SafeBase (third-party)
+  - status.ably.com            -> Statuspage (third-party)
+  - email/faqs/knowledge/pages/quotes -> HubSpot (third-party)
+  - cdn/files/schemas/nonprod-cdn/sdk  -> CloudFront (S3 origins)
+  - brand/dashboards/dashboards-external/ai-assistant -> Vercel
+  - changelog -> headwayapp.co
+  - web-cli-terminal -> global.web-cli-server.ably.com
+Subdomain takeover: NONE (all CNAME chains resolve).
+
+security.txt (real): Contact disclosure@ably.com; Policy ably.com/disclosure.
+
+--------------------------------------------------------------------------------
+3. UNAUTHENTICATED TESTING - RESULTS (all negative / hardened)
+--------------------------------------------------------------------------------
+- ably.com Rails app:
+    * No exposed /.git, /.env, /config/database.yml, backups, manifests.
+    * No reflected XSS in /search or /docs.
+    * Generic JSON error bodies (no stack traces).
+    * /metrics -> 401 (protected). OAuth passthru -> 404.
+    * robots.txt disallows /api/, /users/auth, /ably-auth/, /accounts/, /dashboard.
+- control.ably.net: all routes auth-gated (Ably error 40400/40100).
+- rest.ably.io / main.realtime.ably.net:
+    * /time -> 200 (expected public server time).
+    * /channels, /stats -> 401 (auth required). No unauth data.
+- dashboards-external.ably.com: Vercel login, 307 -> /login?returnTo=/
+    (open-redirect class excluded by policy).
+- Next.js middleware auth-bypass (CVE-2025-29927):
+    x-middleware-subrequest variants -> still 307 to /login (PATCHED).
+- Next.js image optimizer SSRF: no optimizer on canonical ably.com; internal
+    URLs (127.0.0.1, localhost, 169.254.169.254, file://) rejected.
+- web-cli-terminal.ably.com: 404/empty for probed paths.
+- Pricing calculator: client-side; no server-side calculator endpoint found
+    (historical "RCE via pricing calculator" not reproducible).
+
+--------------------------------------------------------------------------------
+4. AUTHENTICATED AUTHORIZATION TESTING (own Ably app, non-destructive)
+--------------------------------------------------------------------------------
+Setup: test account/app 0rvi9w (Free account); account access token + app keys
+provided by account owner for testing. Keys: Root, DETTET (full), Subscribe-only.
+Temporary key created for revocation tests and REVOKED afterwards (status=1).
+
+Results:
+  - Capability bounding (key -> token):
+      * Subscribe-only key requesting {"*":["publish"]} -> token CAPPED to
+        {"*":["subscribe"]}. No escalation.
+      * Minted subscribe-only token: publish -> 401; history -> 401 (no history
+        cap). Correct.
+  - Channel scoping:
+      * Token scoped to chanA: publish/history chanA -> 201/200; chanB ->
+        401/401. Encoded/traversal attempts (chanA/../chanB, chanA%2F..,
+        chanA:chanB, CHANA, trailing dot) all denied (401/403/400). No escape.
+  - Empty capability token request -> rejected (intersection empty).
+  - Excessive TTL (1 year) -> rejected (40003).
+  - Token revocation (historical High bug "Token revocation not enforced"):
+      * Created temporary key with revocableTokens=true.
+      * POST /keys/{key}/revokeTokens {"targets":["clientId:<id>"]} -> 201.
+      * After appliesAt, token publish/history -> 401. REVOCATION ENFORCED.
+      * NOTE: an earlier "still 201" observation was a clock-skew false
+        positive (token issued after issuedBefore); corrected with proper wait.
+  - Tenant isolation / IDOR:
+      * Account token -> /v1/apps/{random}/keys -> 404 "Could not find app".
+      * Historical accounts/:id/apps/:id/app_keys path -> 404 (removed).
+      * Own app keys/queues/rules/namespaces readable (owner capability).
+  - Account-token capability boundary:
+      * /v1/accounts/{id}/apps -> 401 Access denied (read:app not granted).
+      * Reads own app keys (read:key) - expected for owner.
+  - Cleanup: temporary key revoked (publish -> 401 "key/token status changed").
+
+Conclusion: Ably authorization is correctly enforced on all tested paths.
+No confirmed vulnerability found.
+
+--------------------------------------------------------------------------------
+5. HISTORICAL BUG CLASSES (from ably.com/acknowledgements) - RETEST STATUS
+--------------------------------------------------------------------------------
+Tested and NOT reproducible / fixed:
+  - Realtime auth bypass / capability escape ............ denied
+  - Token capability escalation ........................ capped
+  - Token revocation not enforced ....................... enforced
+  - IDOR app_keys / account-context guards .............. 404 / isolation holds
+  - Queue/rule/namespace IDOR ........................... own app only
+  - Middleware auth bypass .............................. patched
+  - SSRF via image optimizer / file upload .............. no surface / rejected
+  - Stored XSS in app/key names ......................... NOT TESTED (needs
+                                                          write:app scope)
+Remaining untested (need more setup):
+  - Integration-rules SSRF (historical "SSRF to RCE") ... needs rule + callback
+  - Cross-tenant IDOR ................................... needs 2nd account
+  - Realtime protocol edge cases (presence, resume, push-admin, revocation
+    propagation on live connections) .................... needs WS harness
+
+--------------------------------------------------------------------------------
+6. SECURITY NOTES
+--------------------------------------------------------------------------------
+- Account access token and app API keys were shared for testing and are
+  therefore considered compromised. ROTATE/REVOKE them.
+- Temporary test key sNuyEA was revoked (status=1).
+- No account data was modified except creation+revocation of the temporary key.
+
+================================================================================
+END
+================================================================================
